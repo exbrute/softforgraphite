@@ -1,7 +1,7 @@
 ﻿# Вызывается из install.bat. Сам по себе его запускать не нужно.
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('Shortcuts', 'RawAccel', 'Elevate', 'EnableAutostart')]
+    [ValidateSet('Shortcuts', 'RawAccel', 'Elevate', 'EnableAutostart', 'InstallClub')]
     [string]$Action,
 
     [switch]$IncludeSystemApps
@@ -301,7 +301,96 @@ function Enable-InstalledAutostart {
 
     New-StartupUrl -Name 'SoundCloud' -Url 'https://soundcloud.com/'
     New-StartupUrl -Name 'GravaStar' -Url 'https://www.gravastar.com/'
+    Enable-GraphiteClubAutostart
     Enable-RazerServices
+}
+
+function Find-GraphiteClubExe {
+    $roots = @(
+        $env:LOCALAPPDATA
+        $env:APPDATA
+        $env:ProgramFiles
+        ${env:ProgramFiles(x86)}
+    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+
+    foreach ($root in $roots) {
+        $hit = Get-ChildItem -LiteralPath $root -Filter '*.exe' -Recurse -Depth 4 -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.Name -match '(?i)graphite' -and
+                $_.Name -notmatch '(?i)setup|uninstall|update'
+            } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+        if ($hit) { return $hit.FullName }
+    }
+    return $null
+}
+
+function Test-AutostartMatches {
+    param([string]$Pattern)
+
+    $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    if (Test-Path -LiteralPath $run) {
+        $item = Get-Item -LiteralPath $run
+        foreach ($name in $item.GetValueNames()) {
+            $value = [string]$item.GetValue($name)
+            if ($name -match $Pattern -or $value -match $Pattern) { return $true }
+        }
+    }
+
+    $startup = [Environment]::GetFolderPath('Startup')
+    if ($startup -and (Test-Path -LiteralPath $startup)) {
+        $link = Get-ChildItem -LiteralPath $startup -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match $Pattern } |
+            Select-Object -First 1
+        if ($link) { return $true }
+    }
+    return $false
+}
+
+function Enable-GraphiteClubAutostart {
+    if (Test-AutostartMatches -Pattern '(?i)graphite') { return }
+
+    $exe = Find-GraphiteClubExe
+    if (-not $exe) { return }
+    Set-RunEntry -Name 'Graphite Club' -Command ('"{0}"' -f $exe)
+}
+
+function Install-GraphiteClub {
+    $pageUrl = 'https://hazenet.today/download'
+    $fallback = 'https://hazenet.today/download/Graphite-Club-Setup-1.1.2.exe'
+    $headers = @{ 'User-Agent' = 'Mozilla/5.0' }
+
+    Write-Host 'Скачиваю Graphite для клубного ПК с hazenet.today...'
+    $url = $fallback
+    try {
+        $html = (Invoke-WebRequest -Uri $pageUrl -Headers $headers -UseBasicParsing).Content
+        $match = [regex]::Match($html, 'href="(?<href>/download/Graphite-Club-Setup-[^"]+\.exe)"')
+        if ($match.Success) {
+            $url = 'https://hazenet.today' + $match.Groups['href'].Value
+        }
+    } catch {
+        Write-Host 'Страницу загрузки не прочитал, беру известную ссылку на установщик.'
+    }
+
+    $setup = Join-Path $env:TEMP 'Graphite-Club-Setup.exe'
+    Invoke-WebRequest -Uri $url -Headers $headers -UseBasicParsing -OutFile $setup
+    Write-Host "Ставлю без окон мастера: $url"
+
+    $proc = Start-Process -FilePath $setup -ArgumentList '/S' -Wait -PassThru
+    $code = $proc.ExitCode
+    Remove-Item -LiteralPath $setup -Force -ErrorAction SilentlyContinue
+    if ($null -ne $code -and $code -ne 0) {
+        throw "Установщик Graphite Club завершился с кодом $code"
+    }
+
+    Enable-GraphiteClubAutostart
+    $installed = Find-GraphiteClubExe
+    if ($installed) {
+        Write-Host "Graphite Club установлен: $installed"
+    } else {
+        Write-Host 'Установщик Graphite Club завершился. При первом запуске программа покажет HWID для ключа.'
+    }
 }
 
 switch ($Action) {
@@ -317,5 +406,8 @@ switch ($Action) {
     }
     'EnableAutostart' {
         Enable-InstalledAutostart -IncludeSystemApps:$IncludeSystemApps
+    }
+    'InstallClub' {
+        Install-GraphiteClub
     }
 }

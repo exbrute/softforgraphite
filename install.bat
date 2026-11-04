@@ -7,7 +7,7 @@ title Установка программ
 rem Дважды щелкните этот файл.
 rem Рядом должны лежать setup.ps1 и папка extras.
 rem Свои установщики: положите .exe в extras и запустите файл ещё раз.
-rem После установки Spotify, Figma, Raw Accel, Razer и оба сайта
+rem После установки Spotify, Figma, Raw Accel, Razer, Graphite Club и оба сайта
 rem прописываются в автозагрузку текущего пользователя.
 
 if /I "%~1"=="--elevated" goto Elevated
@@ -59,6 +59,10 @@ echo [Figma]
 call :Winget "Figma.Figma"
 
 :UserShortcuts
+echo.
+echo [Graphite Club]
+call :InstallClub
+
 echo.
 echo [Ярлыки на рабочем столе]
 call :NeedSetup
@@ -135,7 +139,7 @@ if "%FAILS%"=="0" (
 )
 echo.
 echo Если Raw Accel установился, перезагрузите компьютер, чтобы драйвер заработал.
-echo При входе в Windows сами запустятся Spotify, Figma, Raw Accel, Razer Synapse, SoundCloud и GravaStar.
+echo При входе в Windows сами запустятся Spotify, Figma, Graphite Club, Raw Accel, Razer Synapse, SoundCloud и GravaStar.
 echo.
 pause
 endlocal & exit /b %FAILS%
@@ -144,6 +148,12 @@ endlocal & exit /b %FAILS%
 set "FAILS=0"
 set "LOG=%~dp0install-log.txt"
 >> "%LOG%" echo ==== elevated %DATE% %TIME% ====
+
+if /I not "%~1"=="--elevated" (
+    echo.
+    echo [Graphite Club]
+    call :InstallClub
+)
 
 net session >nul 2>&1
 if errorlevel 1 (
@@ -202,6 +212,25 @@ echo.
 echo Нажмите любую клавишу, чтобы закрыть это окно.
 pause
 endlocal & exit /b %FAILS%
+
+:InstallClub
+echo Ставлю Graphite Club с hazenet.today ...
+call :NeedSetup
+if errorlevel 1 (
+    set /a FAILS+=1
+    exit /b 0
+)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1" -Action InstallClub
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" (
+    echo Не удалось поставить Graphite Club. Код: %RC%
+    >> "%LOG%" echo FAIL GraphiteClub code %RC%
+    set /a FAILS+=1
+) else (
+    echo Graphite Club установлен.
+    >> "%LOG%" echo OK GraphiteClub
+)
+exit /b 0
 
 :EnableAutostart
 echo.
