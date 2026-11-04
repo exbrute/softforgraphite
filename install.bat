@@ -60,10 +60,6 @@ call :Winget "Figma.Figma"
 
 :UserShortcuts
 echo.
-echo [Graphite Club]
-call :InstallClub
-
-echo.
 echo [Ярлыки на рабочем столе]
 call :NeedSetup
 if errorlevel 1 (
@@ -94,7 +90,12 @@ for %%F in ("%~dp0extras\*.exe") do (
     echo.
     echo Запуск %%~nxF
     >> "%LOG%" echo RUN %%~nxF
-    start /wait "" "%%~fF"
+    echo %%~nxF | findstr /I /B "Graphite-Club-Setup" >nul
+    if not errorlevel 1 (
+        start /wait "" "%%~fF" /S
+    ) else (
+        start /wait "" "%%~fF"
+    )
     if errorlevel 1 (
         echo %%~nxF завершился с ошибкой.
         >> "%LOG%" echo FAIL %%~nxF
@@ -148,12 +149,6 @@ endlocal & exit /b %FAILS%
 set "FAILS=0"
 set "LOG=%~dp0install-log.txt"
 >> "%LOG%" echo ==== elevated %DATE% %TIME% ====
-
-if /I not "%~1"=="--elevated" (
-    echo.
-    echo [Graphite Club]
-    call :InstallClub
-)
 
 net session >nul 2>&1
 if errorlevel 1 (
@@ -212,25 +207,6 @@ echo.
 echo Нажмите любую клавишу, чтобы закрыть это окно.
 pause
 endlocal & exit /b %FAILS%
-
-:InstallClub
-echo Ставлю Graphite Club с hazenet.today ...
-call :NeedSetup
-if errorlevel 1 (
-    set /a FAILS+=1
-    exit /b 0
-)
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1" -Action InstallClub
-set "RC=%ERRORLEVEL%"
-if not "%RC%"=="0" (
-    echo Не удалось поставить Graphite Club. Код: %RC%
-    >> "%LOG%" echo FAIL GraphiteClub code %RC%
-    set /a FAILS+=1
-) else (
-    echo Graphite Club установлен.
-    >> "%LOG%" echo OK GraphiteClub
-)
-exit /b 0
 
 :EnableAutostart
 echo.
