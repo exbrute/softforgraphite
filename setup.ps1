@@ -14,9 +14,8 @@ try {
 } catch {
 }
 
-function Get-DesktopPaths {
+function Get-CandidateDesktopPaths {
     $found = New-Object System.Collections.Generic.List[string]
-
     foreach ($key in @(
             'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders',
             'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders'
@@ -27,10 +26,8 @@ function Get-DesktopPaths {
         $expanded = [Environment]::ExpandEnvironmentVariables([string]$raw)
         if ($expanded -and (Test-Path -LiteralPath $expanded)) { $found.Add($expanded) }
     }
-
     $known = [Environment]::GetFolderPath('Desktop')
     if ($known -and (Test-Path -LiteralPath $known)) { $found.Add($known) }
-
     $candidates = @(
         (Join-Path $env:USERPROFILE 'Desktop'),
         (Join-Path $env:USERPROFILE 'OneDrive\Desktop'),
@@ -47,12 +44,96 @@ function Get-DesktopPaths {
     foreach ($path in $candidates) {
         if ($path -and (Test-Path -LiteralPath $path)) { $found.Add($path) }
     }
+    return @($found | ForEach-Object { $_.TrimEnd('\') } | Select-Object -Unique)
+}
 
-    $unique = @($found | ForEach-Object { $_.TrimEnd('\') } | Select-Object -Unique)
-    if ($unique.Count -eq 0) {
-        throw 'Не удалось найти папку рабочего стола.'
+function Test-SameDirectory {
+    param([string]$Left, [string]$Right)
+    if (-not $Left -or -not $Right) { return $false }
+    $a = [IO.Path]::GetFullPath($Left).TrimEnd('\').ToLowerInvariant()
+    $b = [IO.Path]::GetFullPath($Right).TrimEnd('\').ToLowerInvariant()
+    if ($a -eq $b) { return $true }
+    foreach ($path in @($Left, $Right)) {
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        if (-not $item -or -not $item.Target) { continue }
+        foreach ($target in @($item.Target)) {
+            try {
+                $full = [IO.Path]::GetFullPath([string]$target).TrimEnd('\').ToLowerInvariant()
+            } catch {
+                continue
+            }
+            if ($full -eq $a -or $full -eq $b) { return $true }
+        }
     }
-    return $unique
+    return $false
+}
+
+function Get-DesktopPath {
+    $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders'
+    if (Test-Path -LiteralPath $key) {
+        $raw = (Get-ItemProperty -LiteralPath $key -Name Desktop -ErrorAction SilentlyContinue).Desktop
+        if ($raw) {
+            $expanded = [Environment]::ExpandEnvironmentVariables([string]$raw)
+            if ($expanded -and (Test-Path -LiteralPath $expanded)) { return $expanded.TrimEnd('\') }
+        }
+    }
+    $known = [Environment]::GetFolderPath('Desktop')
+    if ($known -and (Test-Path -LiteralPath $known)) { return $known.TrimEnd('\') }
+    throw 'Не удалось найти папку рабочего стола.'
+}
+
+function Get-ShortcutProduct {
+    param($Item, $Shell)
+    $name = [IO.Path]::GetFileNameWithoutExtension($item.Name)
+    $blob = $name
+    if ($Item.Extension -eq '.lnk') {
+        $link = $Shell.CreateShortcut($Item.FullName)
+        $blob = $name + ' ' + [string]$link.TargetPath + ' ' + [string]$link.Arguments
+    } elseif ($Item.Extension -eq '.url') {
+        $blob = $name + ' ' + ((Get-Content -LiteralPath $Item.FullName -ErrorAction SilentlyContinue) -join ' ')
+    }
+    if ($blob -match '(?i)figma') { return 'figma' }
+    if ($blob -match '(?i)graphite') { return 'graphite' }
+    if ($blob -match '(?i)spotify') { return 'spotify' }
+    if ($blob -match '(?i)rawaccel|raw accel') { return 'rawaccel' }
+    if ($blob -match '(?i)razer|synapse') { return 'razer' }
+    if ($blob -match '(?i)soundcloud') { return 'soundcloud' }
+    if ($blob -match '(?i)gravastar') { return 'gravastar' }
+    return $null
+}
+
+function Remove-DuplicateDesktopShortcuts {
+    $primary = Get-DesktopPath
+    $shell = New-Object -ComObject WScript.Shell
+    foreach ($dir in (Get-CandidateDesktopPaths)) {
+        if (Test-SameDirectory $dir $primary) { continue }
+        foreach ($item in @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue)) {
+            if ($item.Extension -notin '.lnk', '.url') { continue }
+            $product = Get-ShortcutProduct -Item $item -Shell $shell
+            if (-not $product) { continue }
+            Remove-Item -LiteralPath $item.FullName -Force
+            Write-Host "Удалён лишний ярлык: $($item.FullName)"
+        }
+    }
+
+    $groups = @{}
+    foreach ($item in @(Get-ChildItem -LiteralPath $primary -Force -ErrorAction SilentlyContinue)) {
+        if ($item.Extension -notin '.lnk', '.url') { continue }
+        $product = Get-ShortcutProduct -Item $item -Shell $shell
+        if (-not $product) { continue }
+        if (-not $groups.ContainsKey($product)) { $groups[$product] = @() }
+        $groups[$product] += $item
+    }
+    foreach ($product in @($groups.Keys)) {
+        $items = @($groups[$product])
+        if ($items.Count -le 1) { continue }
+        $keep = $items | Sort-Object Name | Select-Object -First 1
+        foreach ($extra in $items) {
+            if ($extra.FullName -eq $keep.FullName) { continue }
+            Remove-Item -LiteralPath $extra.FullName -Force
+            Write-Host "Удалён повтор: $($extra.FullName)"
+        }
+    }
 }
 
 function New-SiteShortcut {
@@ -61,22 +142,13 @@ function New-SiteShortcut {
         [string]$Url
     )
 
-    $fileName = $Name + '.url'
-    $written = 0
-    foreach ($desktop in (Get-DesktopPaths)) {
-        $path = Join-Path $desktop $fileName
-        try {
-            Set-Content -LiteralPath $path -Encoding ASCII -Value @(
-                '[InternetShortcut]'
-                "URL=$Url"
-            )
-            Write-Host "Ярлык: $path"
-            $written++
-        } catch {
-            Write-Host "Не удалось записать ${path}: $($_.Exception.Message)"
-        }
-    }
-    if ($written -eq 0) { throw "Ярлык $Name не попал ни на один рабочий стол." }
+    $desktop = Get-DesktopPath
+    $path = Join-Path $desktop ($Name + '.url')
+    Set-Content -LiteralPath $path -Encoding ASCII -Value @(
+        '[InternetShortcut]'
+        "URL=$Url"
+    )
+    Write-Host "Ярлык: $path"
 }
 
 function New-DesktopShortcut {
@@ -87,21 +159,32 @@ function New-DesktopShortcut {
     )
 
     if (-not (Test-Path -LiteralPath $Target)) { return }
+    $desktop = Get-DesktopPath
     $shell = New-Object -ComObject WScript.Shell
-    $fileName = $Name + '.lnk'
-    foreach ($desktop in (Get-DesktopPaths)) {
-        $path = Join-Path $desktop $fileName
-        try {
-            $link = $shell.CreateShortcut($path)
-            $link.TargetPath = $Target
-            $link.WorkingDirectory = $WorkDir
-            $link.Description = $Name
-            $link.Save()
-            Write-Host "Ярлык: $path"
-        } catch {
-            Write-Host "Не удалось записать ${path}: $($_.Exception.Message)"
+    $product = switch -Regex ($Name) {
+        '(?i)figma' { 'figma' }
+        '(?i)graphite' { 'graphite' }
+        '(?i)spotify' { 'spotify' }
+        '(?i)raw accel' { 'rawaccel' }
+        '(?i)razer|synapse' { 'razer' }
+        default { $null }
+    }
+    if ($product) {
+        foreach ($item in @(Get-ChildItem -LiteralPath $desktop -Force -ErrorAction SilentlyContinue)) {
+            if ($item.Extension -notin '.lnk', '.url') { continue }
+            if ((Get-ShortcutProduct -Item $item -Shell $shell) -eq $product) {
+                Write-Host "Ярлык уже есть: $($item.FullName)"
+                return
+            }
         }
     }
+    $path = Join-Path $desktop ($Name + '.lnk')
+    $link = $shell.CreateShortcut($path)
+    $link.TargetPath = $Target
+    $link.WorkingDirectory = $WorkDir
+    $link.Description = $Name
+    $link.Save()
+    Write-Host "Ярлык: $path"
 }
 
 function Install-RawAccel {
@@ -546,6 +629,7 @@ function Install-UserApps {
 
 switch ($Action) {
     'Shortcuts' {
+        Remove-DuplicateDesktopShortcuts
         New-SiteShortcut -Name 'SoundCloud' -Url 'https://soundcloud.com/'
         New-SiteShortcut -Name 'GravaStar' -Url 'https://www.gravastar.com/'
         Publish-AppShortcuts
