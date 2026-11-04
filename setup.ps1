@@ -136,19 +136,53 @@ function Remove-DuplicateDesktopShortcuts {
     }
 }
 
+function Get-BundledIconPath {
+    param([string]$IconName)
+
+    $source = Join-Path $PSScriptRoot (Join-Path 'icons' $IconName)
+    if (-not (Test-Path -LiteralPath $source)) { return $null }
+    $dir = Join-Path $env:LOCALAPPDATA 'SoftForGraphite\icons'
+    if (-not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    $dest = Join-Path $dir $IconName
+    Copy-Item -LiteralPath $source -Destination $dest -Force
+    return $dest
+}
+
 function New-SiteShortcut {
     param(
         [string]$Name,
-        [string]$Url
+        [string]$Url,
+        [string]$IconName
     )
 
     $desktop = Get-DesktopPath
     $path = Join-Path $desktop ($Name + '.url')
-    Set-Content -LiteralPath $path -Encoding ASCII -Value @(
+    $lines = @(
         '[InternetShortcut]'
         "URL=$Url"
     )
+    $icon = $null
+    if ($IconName) { $icon = Get-BundledIconPath -IconName $IconName }
+    if ($icon) {
+        $lines += "IconFile=$icon"
+        $lines += 'IconIndex=0'
+        $lines += '[{000214A0-0000-0000-C000-000000000046}]'
+        $lines += 'Prop3=19,0'
+    }
+    Set-Content -LiteralPath $path -Encoding ASCII -Value $lines
     Write-Host "Ярлык: $path"
+}
+
+function Update-DesktopIcons {
+    if (-not ('DesktopNotify.Native' -as [type])) {
+        Add-Type -Namespace DesktopNotify -Name Native -MemberDefinition @'
+[DllImport("shell32.dll")]
+public static extern void SHChangeNotify(int eventId, uint flags, System.IntPtr item1, System.IntPtr item2);
+'@
+    }
+    [DesktopNotify.Native]::SHChangeNotify(0x8000000, 0x1000, [IntPtr]::Zero, [IntPtr]::Zero)
 }
 
 function New-DesktopShortcut {
@@ -630,9 +664,10 @@ function Install-UserApps {
 switch ($Action) {
     'Shortcuts' {
         Remove-DuplicateDesktopShortcuts
-        New-SiteShortcut -Name 'SoundCloud' -Url 'https://soundcloud.com/'
-        New-SiteShortcut -Name 'GravaStar' -Url 'https://www.gravastar.com/'
+        New-SiteShortcut -Name 'SoundCloud' -Url 'https://soundcloud.com/' -IconName 'soundcloud.ico'
+        New-SiteShortcut -Name 'GravaStar' -Url 'https://www.gravastar.com/' -IconName 'gravastar.ico'
         Publish-AppShortcuts
+        Update-DesktopIcons
     }
     'RawAccel' {
         Install-RawAccel
