@@ -4,11 +4,9 @@ cd /d "%~dp0"
 chcp 65001 >nul
 title Установка программ
 
-rem Дважды щелкните этот файл.
+rem Дважды щелкните этот файл. Можно и от имени администратора:
+rem ярлыки, Spotify, Figma и extras всё равно выполнятся.
 rem Рядом должны лежать setup.ps1 и папка extras.
-rem Свои установщики: положите .exe в extras и запустите файл ещё раз.
-rem После установки Spotify, Figma, Raw Accel, Razer, Graphite Club и оба сайта
-rem прописываются в автозагрузку текущего пользователя.
 
 if /I "%~1"=="--elevated" goto Elevated
 
@@ -18,74 +16,133 @@ set "LOG=%~dp0install-log.txt"
 
 echo.
 echo Папка: %~dp0
-echo Запускайте файл обычным двойным щелчком, не от имени администратора.
-echo Права администратора скрипт запросит сам, когда дойдёт до драйвера.
 echo.
+
+call :Shortcuts
+call :UserApps
+call :Extras
 
 net session >nul 2>&1
-if not errorlevel 1 (
-    echo Файл уже запущен от имени администратора.
-    echo Spotify и Figma так поставить нельзя.
-    echo Сейчас ставятся только Visual C++, Raw Accel и Razer Synapse 4.
-    echo Чтобы поставить остальное, закройте окно и откройте install.bat двойным щелчком.
-    echo.
-    goto Elevated
-)
+if not errorlevel 1 goto AlreadyAdmin
 
-call :ResolveWinget
+echo.
+echo Дальше ставятся Visual C++, Raw Accel и Razer Synapse 4.
+echo Подтвердите запрос администратора в окне Windows.
+>> "%LOG%" echo INFO requesting admin
+call :NeedSetup
 if errorlevel 1 (
-    echo Не найден winget.
-    echo Поставьте "Установщик приложений" из Microsoft Store и запустите файл снова:
-    echo https://apps.microsoft.com/detail/9nblggh4nns1
-    echo Spotify и Figma будут пропущены.
-    >> "%LOG%" echo FAIL winget missing
     set /a FAILS+=1
-    goto UserShortcuts
+    goto Summary
 )
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1" -Action Elevate
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" (
+    echo Часть с правами администратора завершилась с кодом %RC%.
+    >> "%LOG%" echo FAIL elevated code %RC%
+    set /a FAILS+=RC
+) else (
+    >> "%LOG%" echo OK elevated
+)
+goto Summary
 
-echo Обновляю список программ winget...
-"%WINGET%" source update --disable-interactivity
+:AlreadyAdmin
+echo Окно уже с правами администратора. Ставлю драйвер и Razer здесь.
+call :AdminApps
+
+:Summary
+echo.
+echo ----------------------------------------
+if "%FAILS%"=="0" (
+    echo Готово, без ошибок.
+    >> "%LOG%" echo RESULT ok
+) else (
+    echo Готово, но есть ошибки: %FAILS%.
+    echo Лог: %LOG%
+    >> "%LOG%" echo RESULT fails %FAILS%
+)
+echo.
+echo Ярлыки SoundCloud и GravaStar лежат на рабочем столе.
+echo Если Raw Accel установился, перезагрузите компьютер, чтобы драйвер заработал.
+echo.
+pause
+endlocal & exit /b %FAILS%
+
+:Elevated
+set "FAILS=0"
+set "LOG=%~dp0install-log.txt"
+>> "%LOG%" echo ==== elevated %DATE% %TIME% ====
+
+net session >nul 2>&1
 if errorlevel 1 (
-    echo Список winget не обновился. Пробую ставить дальше.
-    >> "%LOG%" echo WARN winget source update
+    echo Права администратора не получены.
+    >> "%LOG%" echo FAIL not admin
+    pause
+    endlocal & exit /b 1
 )
 
-echo.
-echo [Spotify]
-call :Winget "Spotify.Spotify"
+call :AdminApps
 
 echo.
-echo [Figma]
-call :Winget "Figma.Figma"
+if "%FAILS%"=="0" (
+    echo Эта часть прошла без ошибок.
+    >> "%LOG%" echo RESULT elevated ok
+) else (
+    echo Ошибок в этой части: %FAILS%.
+    echo Лог: %LOG%
+    >> "%LOG%" echo RESULT elevated fails %FAILS%
+)
+echo.
+echo Нажмите любую клавишу, чтобы закрыть это окно.
+pause
+endlocal & exit /b %FAILS%
 
-:UserShortcuts
+:Shortcuts
 echo.
 echo [Ярлыки на рабочем столе]
 call :NeedSetup
 if errorlevel 1 (
     set /a FAILS+=1
-    goto UserExtras
+    exit /b 0
 )
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1" -Action Shortcuts
-if errorlevel 1 (
-    echo Не удалось создать ярлыки SoundCloud и GravaStar.
-    >> "%LOG%" echo FAIL shortcuts
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" (
+    echo Не удалось создать ярлыки.
+    >> "%LOG%" echo FAIL shortcuts code %RC%
     set /a FAILS+=1
 ) else (
-    echo На рабочем столе: SoundCloud и GravaStar.
+    echo Ярлыки записаны на рабочий стол.
     >> "%LOG%" echo OK shortcuts
 )
+exit /b 0
 
-:UserExtras
+:UserApps
+echo.
+echo [Spotify и Figma]
+call :NeedSetup
+if errorlevel 1 (
+    set /a FAILS+=1
+    exit /b 0
+)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1" -Action UserApps
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" (
+    echo Spotify или Figma не установились. Код: %RC%
+    >> "%LOG%" echo FAIL UserApps code %RC%
+    set /a FAILS+=1
+) else (
+    >> "%LOG%" echo OK UserApps
+)
+exit /b 0
+
+:Extras
 echo.
 echo [Свои программы из папки extras]
 if not exist "%~dp0extras\*.exe" (
     echo В папке extras пока нет exe.
-    echo Когда файлы будут готовы, положите их туда и запустите install.bat снова.
     >> "%LOG%" echo SKIP extras empty
-    goto Elevate
+    exit /b 0
 )
-
 for %%F in ("%~dp0extras\*.exe") do (
     echo.
     echo Запуск %%~nxF
@@ -105,108 +162,43 @@ for %%F in ("%~dp0extras\*.exe") do (
         >> "%LOG%" echo OK %%~nxF
     )
 )
+exit /b 0
 
-:Elevate
-call :EnableAutostart
-echo.
-echo Дальше ставятся Visual C++, Raw Accel и Razer Synapse 4.
-echo Подтвердите запрос администратора в окне Windows.
->> "%LOG%" echo INFO requesting admin
-call :NeedSetup
-if errorlevel 1 (
-    set /a FAILS+=1
-    goto Summary
-)
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1" -Action Elevate
-set "RC=%ERRORLEVEL%"
-if not "%RC%"=="0" (
-    echo Часть с правами администратора завершилась с кодом %RC%.
-    >> "%LOG%" echo FAIL elevated code %RC%
-    set /a FAILS+=RC
-) else (
-    >> "%LOG%" echo OK elevated
-)
-
-:Summary
-echo.
-echo ----------------------------------------
-if "%FAILS%"=="0" (
-    echo Готово, без ошибок.
-    >> "%LOG%" echo RESULT ok
-) else (
-    echo Готово, но есть ошибки: %FAILS%.
-    echo Лог: %LOG%
-    >> "%LOG%" echo RESULT fails %FAILS%
-)
-echo.
-echo Если Raw Accel установился, перезагрузите компьютер, чтобы драйвер заработал.
-echo При входе в Windows сами запустятся Spotify, Figma, Graphite Club, Raw Accel, Razer Synapse, SoundCloud и GravaStar.
-echo.
-pause
-endlocal & exit /b %FAILS%
-
-:Elevated
-set "FAILS=0"
-set "LOG=%~dp0install-log.txt"
->> "%LOG%" echo ==== elevated %DATE% %TIME% ====
-
-net session >nul 2>&1
-if errorlevel 1 (
-    echo Права администратора не получены.
-    >> "%LOG%" echo FAIL not admin
-    pause
-    endlocal & exit /b 1
-)
-
+:AdminApps
 call :ResolveWinget
 if errorlevel 1 (
     echo winget не найден. Visual C++ и Razer Synapse 4 пропущены.
     >> "%LOG%" echo FAIL winget missing elevated
     set /a FAILS+=1
-    goto ElevatedRaw
+) else (
+    echo.
+    echo [Visual C++] Нужен для Raw Accel
+    call :Winget "Microsoft.VCRedist.2015+.x64"
+    echo.
+    echo [Razer Synapse 4]
+    call :Winget "RazerInc.RazerInstaller.Synapse4"
 )
 
-echo.
-echo [Visual C++] Нужен для Raw Accel
-call :Winget "Microsoft.VCRedist.2015+.x64"
-
-echo.
-echo [Razer Synapse 4]
-call :Winget "RazerInc.RazerInstaller.Synapse4"
-
-:ElevatedRaw
 echo.
 echo [Raw Accel]
 call :NeedSetup
 if errorlevel 1 (
     set /a FAILS+=1
-    goto ElevatedDone
-)
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1" -Action RawAccel
-if errorlevel 1 (
-    echo Raw Accel не установлен.
-    >> "%LOG%" echo FAIL RawAccel
-    set /a FAILS+=1
 ) else (
-    echo Raw Accel установлен. На рабочем столе появился ярлык Raw Accel.
-    >> "%LOG%" echo OK RawAccel
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1" -Action RawAccel
+    if errorlevel 1 (
+        echo Raw Accel не установлен.
+        >> "%LOG%" echo FAIL RawAccel
+        set /a FAILS+=1
+    ) else (
+        echo Raw Accel установлен.
+        >> "%LOG%" echo OK RawAccel
+    )
 )
 
-:ElevatedDone
 call :EnableAutostart full
-echo.
-if "%FAILS%"=="0" (
-    echo Эта часть прошла без ошибок.
-    >> "%LOG%" echo RESULT elevated ok
-) else (
-    echo Ошибок в этой части: %FAILS%.
-    echo Лог: %LOG%
-    >> "%LOG%" echo RESULT elevated fails %FAILS%
-)
-echo.
-echo Нажмите любую клавишу, чтобы закрыть это окно.
-pause
-endlocal & exit /b %FAILS%
+call :Shortcuts
+exit /b 0
 
 :EnableAutostart
 echo.
@@ -240,13 +232,7 @@ exit /b 1
 
 :ResolveWinget
 set "WINGET="
-if exist "%LocalAppData%\Microsoft\WindowsApps\winget.exe" (
-    set "WINGET=%LocalAppData%\Microsoft\WindowsApps\winget.exe"
-    exit /b 0
-)
-for /f "delims=" %%I in ('powershell -NoProfile -Command "(Get-Command winget -ErrorAction SilentlyContinue^).Source"') do (
-    if not defined WINGET set "WINGET=%%I"
-)
+for /f "delims=" %%I in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1" -Action ResolveWinget') do set "WINGET=%%I"
 if not defined WINGET exit /b 1
 exit /b 0
 
