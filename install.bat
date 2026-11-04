@@ -7,6 +7,8 @@ title Установка программ
 rem Дважды щелкните этот файл.
 rem Рядом должны лежать setup.ps1 и папка extras.
 rem Свои установщики: положите .exe в extras и запустите файл ещё раз.
+rem После установки Spotify, Figma, Raw Accel, Razer и оба сайта
+rem прописываются в автозагрузку текущего пользователя.
 
 if /I "%~1"=="--elevated" goto Elevated
 
@@ -100,6 +102,7 @@ for %%F in ("%~dp0extras\*.exe") do (
 )
 
 :Elevate
+call :EnableAutostart
 echo.
 echo Дальше ставятся Visual C++, Raw Accel и Razer Synapse 4.
 echo Подтвердите запрос администратора в окне Windows.
@@ -132,6 +135,7 @@ if "%FAILS%"=="0" (
 )
 echo.
 echo Если Raw Accel установился, перезагрузите компьютер, чтобы драйвер заработал.
+echo При входе в Windows сами запустятся Spotify, Figma, Raw Accel, Razer Synapse, SoundCloud и GravaStar.
 echo.
 pause
 endlocal & exit /b %FAILS%
@@ -184,6 +188,7 @@ if errorlevel 1 (
 )
 
 :ElevatedDone
+call :EnableAutostart full
 echo.
 if "%FAILS%"=="0" (
     echo Эта часть прошла без ошибок.
@@ -197,6 +202,30 @@ echo.
 echo Нажмите любую клавишу, чтобы закрыть это окно.
 pause
 endlocal & exit /b %FAILS%
+
+:EnableAutostart
+echo.
+echo [Автозагрузка]
+call :NeedSetup
+if errorlevel 1 (
+    set /a FAILS+=1
+    exit /b 0
+)
+if /I "%~1"=="full" (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1" -Action EnableAutostart -IncludeSystemApps
+) else (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1" -Action EnableAutostart
+)
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" (
+    echo Не удалось прописать автозагрузку.
+    >> "%LOG%" echo FAIL autostart code %RC%
+    set /a FAILS+=1
+) else (
+    echo Автозагрузка настроена.
+    >> "%LOG%" echo OK autostart
+)
+exit /b 0
 
 :NeedSetup
 if exist "%~dp0setup.ps1" exit /b 0

@@ -1,8 +1,10 @@
 ﻿# Вызывается из install.bat. Сам по себе его запускать не нужно.
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('Shortcuts', 'RawAccel', 'Elevate')]
-    [string]$Action
+    [ValidateSet('Shortcuts', 'RawAccel', 'Elevate', 'EnableAutostart')]
+    [string]$Action,
+
+    [switch]$IncludeSystemApps
 )
 
 $ErrorActionPreference = 'Stop'
@@ -135,6 +137,173 @@ function Invoke-ElevatedInstaller {
     exit $proc.ExitCode
 }
 
+function Test-IsAdmin {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Find-LatestFile {
+    param([string[]]$Patterns)
+
+    $hits = foreach ($pattern in $Patterns) {
+        Get-Item -Path $pattern -ErrorAction SilentlyContinue
+    }
+    $file = @($hits) | Where-Object { $_ -and -not $_.PSIsContainer } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($file) { return $file.FullName }
+    return $null
+}
+
+function Enable-StartupApproved {
+    param(
+        [string]$FolderName,
+        [string]$ValueName
+    )
+
+    $base = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\' + $FolderName
+    if (-not (Test-Path -LiteralPath $base)) {
+        New-Item -Path $base -Force | Out-Null
+    }
+    # 02 00 00 00 means the startup entry is enabled in Task Manager.
+    $enabled = [byte[]](2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    New-ItemProperty -Path $base -Name $ValueName -PropertyType Binary -Value $enabled -Force | Out-Null
+}
+
+function Set-RunEntry {
+    param(
+        [string]$Name,
+        [string]$Command
+    )
+
+    $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    if (-not (Test-Path -LiteralPath $run)) {
+        New-Item -Path $run -Force | Out-Null
+    }
+    New-ItemProperty -Path $run -Name $Name -Value $Command -PropertyType String -Force | Out-Null
+    Enable-StartupApproved -FolderName 'Run' -ValueName $Name
+    Write-Host "Автозагрузка: $Name"
+}
+
+function New-StartupUrl {
+    param(
+        [string]$Name,
+        [string]$Url
+    )
+
+    $startup = [Environment]::GetFolderPath('Startup')
+    if ([string]::IsNullOrWhiteSpace($startup)) {
+        throw 'Не удалось найти папку автозагрузки.'
+    }
+    $fileName = $Name + '.url'
+    $path = Join-Path $startup $fileName
+    Set-Content -LiteralPath $path -Encoding ASCII -Value @(
+        '[InternetShortcut]'
+        "URL=$Url"
+    )
+    Enable-StartupApproved -FolderName 'StartupFolder' -ValueName $fileName
+    Write-Host "Автозагрузка: $path"
+}
+
+function New-StartupShortcut {
+    param(
+        [string]$Name,
+        [string]$Target,
+        [string]$WorkDir
+    )
+
+    $startup = [Environment]::GetFolderPath('Startup')
+    $fileName = $Name + '.lnk'
+    $path = Join-Path $startup $fileName
+    $shell = New-Object -ComObject WScript.Shell
+    $link = $shell.CreateShortcut($path)
+    $link.TargetPath = $Target
+    $link.WorkingDirectory = $WorkDir
+    $link.Description = $Name
+    $link.WindowStyle = 7
+    $link.Save()
+    Enable-StartupApproved -FolderName 'StartupFolder' -ValueName $fileName
+    Write-Host "Автозагрузка: $path"
+}
+
+function Enable-RazerServices {
+    if (-not (Test-IsAdmin)) { return }
+
+    $services = Get-Service -ErrorAction SilentlyContinue | Where-Object {
+        ($_.Name -match '(?i)razer|synapse' -or $_.DisplayName -match '(?i)razer|synapse') -and
+        $_.Name -notmatch '(?i)rawaccel' -and
+        $_.DisplayName -notmatch '(?i)rawaccel'
+    }
+    foreach ($service in $services) {
+        try {
+            Set-Service -Name $service.Name -StartupType Automatic -ErrorAction Stop
+            if ($service.Status -ne 'Running') {
+                Start-Service -Name $service.Name -ErrorAction SilentlyContinue
+            }
+            Write-Host "Служба запускается с Windows: $($service.DisplayName)"
+        } catch {
+            Write-Host "Службу $($service.DisplayName) не удалось поставить в автозапуск: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Enable-InstalledAutostart {
+    param([switch]$IncludeSystemApps)
+
+    $spotify = Find-LatestFile -Patterns @(
+        (Join-Path $env:APPDATA 'Spotify\Spotify.exe')
+        (Join-Path $env:LOCALAPPDATA 'Spotify\Spotify.exe')
+    )
+    if ($spotify) {
+        Set-RunEntry -Name 'Spotify' -Command ('"{0}" --autostart --minimized' -f $spotify)
+    } else {
+        Write-Host 'Spotify.exe ещё нет, запись автозагрузки для него пропущена.'
+    }
+
+    $figma = Find-LatestFile -Patterns @(
+        (Join-Path $env:LOCALAPPDATA 'Figma\Figma.exe')
+        (Join-Path $env:LOCALAPPDATA 'Figma\app-*\Figma.exe')
+        (Join-Path $env:ProgramFiles 'Figma\Figma.exe')
+        (Join-Path ${env:ProgramFiles(x86)} 'Figma\Figma.exe')
+    )
+    if ($figma) {
+        Set-RunEntry -Name 'Figma' -Command ('"{0}"' -f $figma)
+    } else {
+        Write-Host 'Figma.exe ещё нет, запись автозагрузки для него пропущена.'
+    }
+
+    $figmaAgent = Find-LatestFile -Patterns @(
+        (Join-Path $env:LOCALAPPDATA 'FigmaAgent\figma_agent.exe')
+        (Join-Path $env:LOCALAPPDATA 'Figma\FigmaAgent.exe')
+    )
+    if ($figmaAgent) {
+        Set-RunEntry -Name 'FigmaAgent' -Command ('"{0}"' -f $figmaAgent)
+    }
+
+    $razer = Find-LatestFile -Patterns @(
+        (Join-Path $env:ProgramFiles 'Razer\RazerAppEngine\RazerAppEngine.exe')
+        (Join-Path ${env:ProgramFiles(x86)} 'Razer\RazerAppEngine\RazerAppEngine.exe')
+    )
+    if ($razer) {
+        $razerCommand = '"{0}" --url-params=apps=synapse --launch-force-hidden=synapse --autoStart=1' -f $razer
+        Set-RunEntry -Name 'RazerAppEngine' -Command $razerCommand
+    } elseif ($IncludeSystemApps) {
+        Write-Host 'RazerAppEngine.exe ещё нет, запись автозагрузки для него пропущена.'
+    }
+
+    $rawAccel = Find-LatestFile -Patterns @(
+        (Join-Path $env:ProgramFiles 'RawAccel\rawaccel.exe')
+    )
+    if ($rawAccel) {
+        New-StartupShortcut -Name 'Raw Accel' -Target $rawAccel -WorkDir (Split-Path -Parent $rawAccel)
+    } elseif ($IncludeSystemApps) {
+        Write-Host 'rawaccel.exe ещё нет, ярлык автозагрузки для него пропущен.'
+    }
+
+    New-StartupUrl -Name 'SoundCloud' -Url 'https://soundcloud.com/'
+    New-StartupUrl -Name 'GravaStar' -Url 'https://www.gravastar.com/'
+    Enable-RazerServices
+}
+
 switch ($Action) {
     'Shortcuts' {
         New-SiteShortcut -Name 'SoundCloud' -Url 'https://soundcloud.com/'
@@ -145,5 +314,8 @@ switch ($Action) {
     }
     'Elevate' {
         Invoke-ElevatedInstaller
+    }
+    'EnableAutostart' {
+        Enable-InstalledAutostart -IncludeSystemApps:$IncludeSystemApps
     }
 }
